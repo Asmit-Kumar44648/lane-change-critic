@@ -273,18 +273,22 @@ export function renderFrame() {
 }
 
 function drawOverlay() {
-    // Canvas Loading Shimmer
+    // Canvas Loading Shimmer (Diagonal Stripes)
     if (currentState === AppState.RUNNING) {
         ctx.save();
-        ctx.globalAlpha = 0.1;
-        ctx.strokeStyle = 'white';
-        ctx.lineWidth = 20;
-        const time = Date.now() * 0.05;
-        for (let i = -canvas.width; i < canvas.width * 2; i += 40) {
+        ctx.globalAlpha = 0.05;
+        ctx.fillStyle = 'white';
+        const time = Date.now() * 0.1;
+        const stripeWidth = 50;
+        const gap = 50;
+        for (let x = -h; x < w + h; x += stripeWidth + gap) {
             ctx.beginPath();
-            ctx.moveTo(i + time % 40, 0);
-            ctx.lineTo(i + 400 + time % 40, canvas.height);
-            ctx.stroke();
+            const xOffset = x + (time % (stripeWidth + gap));
+            ctx.moveTo(xOffset, 0);
+            ctx.lineTo(xOffset + stripeWidth, 0);
+            ctx.lineTo(xOffset + stripeWidth - h, h);
+            ctx.lineTo(xOffset - h, h);
+            ctx.fill();
         }
         ctx.restore();
     }
@@ -301,30 +305,40 @@ function drawOverlay() {
     if (activeAnnotation) {
         const frame = replayTrace[replayIndex];
         if (frame) {
-            const { cx, cy, scale } = worldToCanvas(frame.ego.x, frame.ego.lane);
+            // Find the vehicle to annotate (highlighted or ego)
+            const targetVehicle = frame.neighbors.find(n => n.id === highlightedVehicleId) || frame.ego;
+            const { cx, cy } = worldToCanvas(targetVehicle.x, targetVehicle.lane, targetVehicle.lateralOffset || 0);
             
-            // Draw line to ego
+            ctx.save();
+            // Callout Label
+            const labelX = cx + 40;
+            const labelY = cy - 60;
+            const padding = { h: 10, v: 6 };
+            
+            ctx.font = '11px var(--font-mono)';
+            const textWidth = ctx.measureText(activeAnnotation.text).width;
+            const labelW = textWidth + padding.h * 2;
+            const labelH = 11 + padding.v * 2;
+
+            // Line to vehicle
             ctx.strokeStyle = 'var(--color-amber)';
-            ctx.lineWidth = 1;
-            ctx.setLineDash([5, 5]);
+            ctx.lineWidth = 1.5;
             ctx.beginPath();
             ctx.moveTo(cx, cy);
-            ctx.lineTo(50, canvas.height - 100);
+            ctx.lineTo(labelX, labelY + labelH / 2);
             ctx.stroke();
-            ctx.setLineDash([]);
 
-            // Draw rounded label
-            const labelW = 280;
-            const labelH = 30;
+            // Label background
             ctx.fillStyle = 'rgba(255, 179, 0, 0.9)';
             ctx.beginPath();
-            ctx.roundRect(20, canvas.height - 120, labelW, labelH, 6);
+            ctx.roundRect(labelX, labelY, labelW, labelH, 4);
             ctx.fill();
             
+            // Label text
             ctx.fillStyle = '#000';
-            ctx.font = 'bold 11px var(--font-mono)';
             ctx.textAlign = 'left';
-            ctx.fillText(activeAnnotation.text, 30, canvas.height - 101);
+            ctx.fillText(activeAnnotation.text, labelX + padding.h, labelY + labelH - padding.v - 1);
+            ctx.restore();
         }
     }
 
@@ -396,11 +410,19 @@ function updateSliderDisplay(id) {
     if (tooltip) tooltip.textContent = val;
 }
 
-const tooltipTimers = {};
 function showTooltip(id) {
+    const el = document.getElementById(id);
     const tooltip = document.getElementById(id + '-tooltip');
     if (!tooltip) return;
+    
     tooltip.classList.add('show');
+    
+    // Position tooltip above thumb
+    const ratio = (el.value - el.min) / (el.max - el.min);
+    const thumbWidth = 16;
+    const offset = (ratio * (el.offsetWidth - thumbWidth)) + (thumbWidth / 2);
+    tooltip.style.left = offset + 'px';
+    
     clearTimeout(tooltipTimers[id]);
     tooltipTimers[id] = setTimeout(() => hideTooltip(id), 1000);
 }
@@ -534,18 +556,23 @@ function renderReplayFrame(index) {
     
     updateSimState(frame);
     
-    // Identify violator
-    let violatorId = null;
-    let violatedReason = '';
-    if (frame.eval && frame.eval.violated.length > 0) {
-        violatorId = 'Adversary'; // Simplified for now, or find from trace
-        violatedReason = frame.eval.violated[0];
-    }
+    // Identify violator (find vehicle that is too close)
+    let violator = frame.neighbors.find(n => {
+        const dist = Math.abs(n.x - frame.ego.x);
+        return dist < 10; // Simple heuristic for replay
+    });
     
-    setHighlight(violatorId || 'rear'); // Fallback to 'rear' as it's the primary adversary in test
+    const violatorID = violator ? violator.id : 'rear';
+    setHighlight(violatorID);
+    
+    const vConstraint = frame.eval.violated[0] || 'Safety Buffer';
+    const vValue = frame.eval.sms < 0.2 ? 'Critical' : 'Low';
     
     activeAnnotation = {
-        text: `T = ${(frame.timestep * 0.75).toFixed(2)}s | SMS: ${Math.round(frame.eval.sms * 100)}% | Violation: ${violatedReason || 'None'}`
+        x: violator ? violator.x : frame.ego.x - 10,
+        lane: violator ? violator.lane : frame.ego.lane,
+        lateralOffset: violator ? violator.lateralOffset : 0,
+        text: `T=${(frame.timestep * 0.75).toFixed(2)}s | Violation: ${vConstraint} (${vValue})`
     };
 }
 
