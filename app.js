@@ -121,15 +121,7 @@ function setState(newState) {
 
 function reportError(type, err) {
     console.error(`[ERROR:${type}]`, err);
-    const overlay = document.getElementById('loading-overlay');
-    if (overlay) {
-        overlay.hidden = false;
-        overlay.innerHTML = `<div style="color:#ef4444; padding:20px; background:rgba(0,0,0,0.8); border:2px solid #ef4444; border-radius:8px;">
-            <h2 style="margin:0 0 10px 0">Engine Failure</h2>
-            <p style="font-family:monospace; font-size:12px;">${err.message || err}</p>
-            <button onclick="location.reload()" style="margin-top:10px; padding:8px 16px; background:#ef4444; color:white; border:none; cursor:pointer;">Reload App</button>
-        </div>`;
-    }
+    alert(`Engine Error: ${err.message || err}`);
 }
 
 // --- COORDINATE MAPPING ---
@@ -196,10 +188,7 @@ function renderFrame() {
 }
 
 function drawOverlay() {
-    if (currentState === AppState.RUNNING) {
-        ctx.fillStyle = 'rgba(255,255,255,0.05)';
-        ctx.fillRect(0, 0, canvas.width, canvas.height);
-    }
+    // Shimmer removed for seamless experience
 }
 
 // --- WORKER BRIDGE ---
@@ -311,8 +300,7 @@ function getParams() {
 
 function renderUIForState() {
     const s = currentState;
-    document.getElementById('loading-overlay').hidden = s !== AppState.RUNNING;
-    document.getElementById('verdict-card').hidden = (s !== AppState.RESULT_SAFE && s !== AppState.RESULT_UNSAFE && s !== AppState.REPLAYING);
+    document.getElementById('verdict-card').hidden = (s === AppState.IDLE || s === AppState.RUNNING);
     document.getElementById('replay-controls').hidden = (s !== AppState.RESULT_UNSAFE && s !== AppState.REPLAYING);
     document.getElementById('btn-run').disabled = s === AppState.RUNNING;
 }
