@@ -24,8 +24,25 @@ let replayInterval = null;
 
 // --- UTILITIES ---
 function setState(newState) {
+  console.log(`[STATE] Transitioning to ${newState}`);
   currentState = newState;
   renderUIForState();
+}
+
+// polyfill/fallback for roundRect (added to CanvasRenderingContext2D.prototype if missing)
+if (!CanvasRenderingContext2D.prototype.roundRect) {
+  CanvasRenderingContext2D.prototype.roundRect = function(x, y, w, h, r) {
+    if (w < 2 * r) r = w / 2;
+    if (h < 2 * r) r = h / 2;
+    this.beginPath();
+    this.moveTo(x + r, y);
+    this.arcTo(x + w, y, x + w, y + h, r);
+    this.arcTo(x + w, y + h, x, y + h, r);
+    this.arcTo(x, y + h, x, y, r);
+    this.arcTo(x, y, x + w, y, r);
+    this.closePath();
+    return this;
+  };
 }
 
 import { scenarios } from './scenarios.js';
@@ -473,12 +490,33 @@ function resetApp() {
 
 // --- WORKER BRIDGE ---
 const worker = new Worker('dls_worker.js');
+worker.onerror = function(e) {
+    console.error('[WORKER CRITICAL ERROR]', e.message, 'at', e.filename, ':', e.lineno);
+    alert('Safety Engine Error: ' + e.message);
+    setState(AppState.IDLE);
+};
 
 function runVerifier() {
+    console.log('[VERIFIER] Starting search...');
+    const params = getParams();
+    
+    // Safety check for NaN
+    if (isNaN(params.depth) || isNaN(params.frontGapThreshold)) {
+        console.error('[VERIFIER] Invalid params detected:', params);
+        alert('Invalid parameters. Resetting to defaults.');
+        resetApp();
+        return;
+    }
+
     setState(AppState.RUNNING);
     activeAnnotation = null;
-    const params = getParams();
-    worker.postMessage({ type: 'RUN', scenario: currentScenario, params });
+    
+    try {
+        worker.postMessage({ type: 'RUN', scenario: currentScenario, params });
+    } catch (e) {
+        console.error('[VERIFIER] Worker error:', e);
+        setState(AppState.IDLE);
+    }
     
     // Update URL
     const url = new URL(window.location);
@@ -497,6 +535,7 @@ function getParams() {
 }
 
 worker.onmessage = function(e) {
+    console.log('[WORKER] Result received:', e.data.verdict);
     lastResult = e.data;
     
     // Update UI Elements

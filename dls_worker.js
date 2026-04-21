@@ -43,9 +43,10 @@ function getActions(state, isEgo) {
     }));
     neighborsWithDist.sort((a, b) => a.dist - b.dist);
 
+    const activeAdversaryCount = (params.depth > 4) ? 1 : 2;
     const activeNeighborIds = neighborsWithDist
       .filter(d => d.dist < 60)
-      .slice(0, 2) // Max 2 active adversaries = 3^2 = 9 combinations
+      .slice(0, activeAdversaryCount) 
       .map(d => d.n.id);
 
     const neighborActionSets = state.neighbors.map(n => {
@@ -267,6 +268,13 @@ function reconstructWorstTrace(state, depth, isEgoTurn, params) {
 self.onmessage = function(e) {
   if (e.data.type === 'RUN') {
     const { scenario, params } = e.data;
+    
+    // Defensive check
+    if (!scenario || !params || !params.depth) {
+      console.error('[WORKER] Invalid search inputs:', { scenario, params });
+      return;
+    }
+    
     nodesExplored = 0;
     branchesPruned = 0;
     depthReached = 0;
