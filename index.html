@@ -1,0 +1,153 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Safety-First Lane Change Critic</title>
+  <link rel="stylesheet" href="styles.css">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&family=JetBrains+Mono&display=swap" rel="stylesheet">
+</head>
+<body>
+  <div id="app" class="app-container">
+    
+    <!-- LEFT PANEL -->
+    <aside id="control-panel">
+      
+      <div class="panel-header">
+        <h1>Lane Change Critic</h1>
+        <p class="subtitle">Adversarial Minimax Safety Verifier</p>
+      </div>
+
+      <div class="control-group">
+        <label>Scenario</label>
+        <select id="scenario-select">
+          <option value="guaranteedSafe">Guaranteed Safe</option>
+          <option value="guaranteedUnsafe">Guaranteed Unsafe</option>
+          <option value="borderlineGap">Borderline Gap</option>
+          <option value="borderlineSpeed">Borderline Speed</option>
+        </select>
+      </div>
+
+      <div class="control-group">
+        <label>Front Gap Threshold <span id="frontGap-val">20m</span></label>
+        <div class="slider-container">
+          <div id="frontGap-tooltip" class="slider-tooltip">20m</div>
+          <input type="range" id="frontGap" min="5" max="50" step="1" value="20">
+        </div>
+      </div>
+
+      <div class="control-group">
+        <label>Rear Gap Threshold <span id="rearGap-val">20m</span></label>
+        <div class="slider-container">
+          <div id="rearGap-tooltip" class="slider-tooltip">20m</div>
+          <input type="range" id="rearGap" min="5" max="50" step="1" value="20">
+        </div>
+      </div>
+
+      <div class="control-group">
+        <label>TTC Threshold <span id="ttc-val">5.0s</span></label>
+        <div class="slider-container">
+          <div id="ttc-tooltip" class="slider-tooltip">5.0s</div>
+          <input type="range" id="ttc" min="1" max="10" step="0.5" value="5">
+        </div>
+      </div>
+
+      <div class="control-group">
+        <label>Search Depth <span id="depth-val">4</span></label>
+        <div class="slider-container">
+          <div id="depth-tooltip" class="slider-tooltip">4</div>
+          <input type="range" id="depth" min="1" max="6" step="1" value="4">
+        </div>
+      </div>
+
+      <div class="control-group">
+        <label>Adversarial Aggression <span id="aggression-val">1.0</span></label>
+        <div class="slider-container">
+          <div id="aggression-tooltip" class="slider-tooltip">1.0</div>
+          <input type="range" id="aggression" min="0" max="1" step="0.1" value="1">
+        </div>
+      </div>
+
+      <div class="button-group">
+        <button id="btn-run" class="btn btn-primary">▶ Run Verifier</button>
+        <button id="btn-reset" class="btn btn-secondary">↺ Reset</button>
+      </div>
+
+      <div class="button-group replay-controls" id="replay-controls" hidden>
+        <button id="btn-step-back" class="btn btn-sm">◀ Back</button>
+        <button id="btn-play-pause" class="btn btn-sm">⏸ Pause</button>
+        <button id="btn-step-forward" class="btn btn-sm">▶ Forward</button>
+      </div>
+
+      <div class="button-group">
+        <button id="btn-demo" class="btn btn-accent">🎓 Demo Mode</button>
+        <button id="btn-copy-json" class="btn btn-secondary">📋 Copy JSON</button>
+      </div>
+
+      <div id="search-stats" class="stats-panel" hidden>
+        <div class="stat-row">
+          <span>Nodes explored</span><span id="stat-nodes">—</span>
+        </div>
+        <div class="stat-row">
+          <span>Branches pruned</span><span id="stat-pruned">—</span>
+        </div>
+        <div class="stat-row">
+          <span>Depth reached</span><span id="stat-depth">—</span>
+        </div>
+      </div>
+
+      <div class="kb-hints">
+        <div class="kb-row"><span class="kb-key">R</span><span class="kb-action">Run Verifier</span></div>
+        <div class="kb-row"><span class="kb-key">Esc</span><span class="kb-action">Reset</span></div>
+        <div class="kb-row"><span class="kb-key">Space</span><span class="kb-action">Play/Pause</span></div>
+        <div class="kb-row"><span class="kb-key">←</span><span class="kb-key">→</span><span class="kb-action">Step Replay</span></div>
+      </div>
+
+    </aside>
+
+    <!-- RIGHT PANEL -->
+    <main id="main-panel">
+      <canvas id="sim-canvas"></canvas>
+      
+      <div id="verdict-card" class="verdict-card" hidden>
+        <div class="verdict-badge" id="verdict-badge">—</div>
+        
+        <div class="sms-bar-container">
+          <div class="sms-bar-label">Safety Margin Score</div>
+          <div class="sms-bar-track">
+            <div class="sms-bar-fill" id="sms-bar-fill" style="width:0%"></div>
+          </div>
+          <div class="sms-score-value" id="sms-score-value">—</div>
+        </div>
+
+        <table class="constraint-table" id="constraint-table">
+          <thead>
+            <tr><th>Constraint</th><th>Score</th><th>Status</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>Front Gap</td><td id="c-frontgap">—</td><td id="cs-frontgap">—</td></tr>
+            <tr><td>Rear Gap</td><td id="c-reargap">—</td><td id="cs-reargap">—</td></tr>
+            <tr><td>TTC</td><td id="c-ttc">—</td><td id="cs-ttc">—</td></tr>
+            <tr><td>Lateral</td><td id="c-lateral">—</td><td id="cs-lateral">—</td></tr>
+          </tbody>
+        </table>
+
+        <div class="counterexample-note" id="counterexample-note" hidden>
+          ⚠️ Counterexample found. Use replay controls to step through.
+        </div>
+      </div>
+
+      <div id="loading-overlay" class="loading-overlay" hidden>
+        <div class="spinner"></div>
+        <p>Running adversarial search...</p>
+      </div>
+    </main>
+
+  </div>
+
+  <script type="module" src="scenarios.js"></script>
+  <script type="module" src="app.js"></script>
+</body>
+</html>
