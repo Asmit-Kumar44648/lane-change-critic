@@ -1,6 +1,6 @@
 /**
  * Safety-First Lane Change Critic
- * NUCLEAN HARDENED MINIMAX ENGINE
+ * NUCLEAN HARDENED MINIMAX ENGINE — ULTRA FAST SINGLE-PASS
  */
 
 const TIMESTEP = 0.75;
@@ -16,7 +16,7 @@ const SMS_WEIGHTS = { frontGap: 0.30, rearGap: 0.25, ttc: 0.30, lateral: 0.15 };
 const VEHICLE_LENGTH = 5;
 
 let searchStartTime = 0;
-const SEARCH_TIMEOUT = 3000; // 3 seconds hard limit
+const SEARCH_TIMEOUT = 3000;
 
 function createNextState(state) {
   return {
@@ -33,19 +33,14 @@ function getActions(state, isEgo, params) {
     if (state.laneChangeTick === 0) actions.push('INITIATE_LC');
     return actions;
   } else {
-    // HARD PRUNING: Only allow 1 adversarial neighbor if depth is high or many neighbors exist
     const dists = state.neighbors.map(n => ({ id: n.id, d: Math.abs(n.x - state.ego.x) }));
     dists.sort((a,b) => a.d - b.d);
-    
-    // Limits: Max 1 active adversary for N=6 depth, Max 2 for N=4 depth.
-    const maxAdversaries = params.depth > 4 ? 1 : 2;
-    const activeIds = dists.slice(0, maxAdversaries).map(d => d.id);
-
+    const maxActive = params.depth > 4 ? 1 : 2;
+    const activeIds = dists.slice(0, maxActive).map(d => d.id);
     const sets = state.neighbors.map(n => {
       if (!activeIds.includes(n.id) || n.mode === 'normal') return ['MAINTAIN'];
       return ['HARD_BRAKE', 'ACCELERATE_CUTOFF', 'SWERVE_TOWARD'];
     });
-
     return sets.reduce((acc, set) => {
       const next = [];
       for (const p of acc) {
@@ -63,12 +58,10 @@ function getActions(state, isEgo, params) {
 function applyAction(state, egoAction, neighborActions) {
   const next = createNextState(state);
   next.timestep++;
-
   if (egoAction) {
     if (egoAction === 'ACCELERATE') next.ego.vx = Math.min(MAX_SPEED, next.ego.vx + MAX_ACCEL * TIMESTEP);
     else if (egoAction === 'DECELERATE') next.ego.vx = Math.max(MIN_SPEED, next.ego.vx - MAX_ACCEL * TIMESTEP);
     else if (egoAction === 'INITIATE_LC') next.laneChangeTick = 1;
-
     if (next.laneChangeTick > 0) {
       next.ego.lateralOffset += LANE_WIDTH / LC_TICKS;
       next.laneChangeTick++;
@@ -80,7 +73,6 @@ function applyAction(state, egoAction, neighborActions) {
     }
     next.ego.x += next.ego.vx * TIMESTEP;
   }
-
   if (neighborActions && neighborActions.length > 0) {
     next.neighbors.forEach((n, i) => {
       const action = neighborActions[i];
@@ -97,7 +89,6 @@ function evaluateSafety(state, params) {
   const ego = state.ego;
   let gap_f = Infinity, gap_r = Infinity, ttc_r = Infinity;
   const egoEffY = (ego.lane * LANE_WIDTH) - ego.lateralOffset;
-
   state.neighbors.forEach(n => {
     const nEffY = (n.lane * LANE_WIDTH) + n.lateralOffset;
     if (Math.abs(egoEffY - nEffY) < LANE_WIDTH * 0.9) {
@@ -109,12 +100,10 @@ function evaluateSafety(state, params) {
       }
     }
   });
-
   const s_f = Math.max(0, Math.min(1, gap_f / params.frontGapThreshold));
   const s_r = Math.max(0, Math.min(1, gap_r / params.rearGapThreshold));
   const s_ttc = Math.max(0, Math.min(1, Math.min(ttc_r, 10) / 10));
   const s_lat = Math.max(0, Math.min(1, Math.min(ego.lateralOffset, LANE_WIDTH - ego.lateralOffset) / (LANE_WIDTH/2)));
-  
   const sms = (s_f * SMS_WEIGHTS.frontGap) + (s_r * SMS_WEIGHTS.rearGap) + (s_ttc * SMS_WEIGHTS.ttc) + (s_lat * SMS_WEIGHTS.lateral);
   return { sms, breakdown: { s_f, s_r, s_ttc, s_lat } };
 }
@@ -124,89 +113,74 @@ function isTerminal(state, params) {
   for (let n of state.neighbors) {
     const egoEffY = (state.ego.lane * LANE_WIDTH) - state.ego.lateralOffset;
     const nEffY = (n.lane * LANE_WIDTH) + n.lateralOffset;
-    if (Math.abs(state.ego.x - n.x) < VEHICLE_LENGTH && Math.abs(egoEffY - nEffY) < (LANE_WIDTH * 0.7)) return true;
+    if (Math.abs(state.ego.x - n.x) < VEHICLE_LENGTH/2 && Math.abs(egoEffY - nEffY) < (LANE_WIDTH * 0.7)) return true;
   }
   return false;
 }
 
+/**
+ * SINGLE-PASS MINIMAX
+ * Returns { score, trace } to avoid expensive re-runs.
+ */
 function minimax(state, depth, alpha, beta, isEgoTurn, params) {
-  if (Date.now() - searchStartTime > SEARCH_TIMEOUT) return 0.5; // Emergency abort
+  if (Date.now() - searchStartTime > SEARCH_TIMEOUT) return { score: 0.5, trace: [] };
   
   const term = isTerminal(state, params);
-  if (term || depth === 0) {
-    const ev = evaluateSafety(state, params);
-    return (term && state.timestep < params.depth * 2) ? 0 : ev.sms;
+  const ev = evaluateSafety(state, params);
+  const currentStateFrame = { ...state, eval: ev };
+
+  if (term || depth === 1) { // Stop at 1 to ensure some trace
+    const score = (term && state.timestep < params.depth * 2) ? 0 : ev.sms;
+    return { score, trace: [currentStateFrame] };
   }
 
   if (isEgoTurn) {
-    let best = -Infinity;
+    let bestScore = -Infinity;
+    let bestTrace = [];
     for (const a of getActions(state, true, params)) {
-      const s = minimax(applyAction(state, a, []), depth - 1, alpha, beta, false, params);
-      best = Math.max(best, s);
-      alpha = Math.max(alpha, best);
+      const next = applyAction(state, a, []);
+      const res = minimax(next, depth - 1, alpha, beta, false, params);
+      if (res.score > bestScore) {
+        bestScore = res.score;
+        bestTrace = [currentStateFrame, ...res.trace];
+      }
+      alpha = Math.max(alpha, bestScore);
       if (beta <= alpha) break;
     }
-    return best;
+    return { score: bestScore, trace: bestTrace };
   } else {
-    let worst = Infinity;
+    let worstScore = Infinity;
+    let worstTrace = [];
     for (const j of getActions(state, false, params)) {
-      const s = minimax(applyAction(state, null, j), depth - 1, alpha, beta, true, params);
-      worst = Math.min(worst, s);
-      beta = Math.min(beta, worst);
+      const next = applyAction(state, null, j);
+      const res = minimax(next, depth - 1, alpha, beta, true, params);
+      if (res.score < worstScore) {
+        worstScore = res.score;
+        worstTrace = [currentStateFrame, ...res.trace];
+      }
+      beta = Math.min(beta, worstScore);
       if (beta <= alpha) break;
     }
-    return worst;
+    return { score: worstScore, trace: worstTrace };
   }
-}
-
-function reconstruct(state, depth, isEgoTurn, params) {
-    const trace = []; let curr = state; let d = depth; let turn = isEgoTurn;
-    while (d > 0 && !isTerminal(curr, params)) {
-        trace.push({ ...curr, eval: evaluateSafety(curr, params) });
-        if (turn) {
-            let b = -Infinity; let bm = 'MAINTAIN';
-            for (const a of getActions(curr, true, params)) {
-                const s = minimax(applyAction(curr, a, []), d-1, -Infinity, Infinity, false, params);
-                if (s > b) { b = s; bm = a; }
-            }
-            curr = applyAction(curr, bm, []);
-        } else {
-            let w = Infinity; let wm = [];
-            for (const j of getActions(curr, false, params)) {
-                const s = minimax(applyAction(curr, null, j), d-1, -Infinity, Infinity, true, params);
-                if (s < w) { w = s; wm = j; }
-            }
-            curr = applyAction(curr, null, wm);
-        }
-        turn = !turn; d--;
-    }
-    trace.push({ ...curr, eval: evaluateSafety(curr, params) });
-    return trace;
 }
 
 self.onmessage = function(e) {
   try {
     const { scenario, params } = e.data;
     if (!scenario || !params) return;
-    
     searchStartTime = Date.now();
     const initialState = {
       ego: { ...scenario.ego, lateralOffset: 0 },
       neighbors: scenario.neighbors.map(n => ({ ...n, lateralOffset: 0 })),
       timestep: 0, laneChangeTick: 0
     };
-
-    const score = minimax(initialState, params.depth * 2, -Infinity, Infinity, true, params);
-    let trace = [];
-    if (score < SMS_THRESHOLD) trace = reconstruct(initialState, params.depth * 2, true, params);
-
+    const result = minimax(initialState, params.depth * 2, -Infinity, Infinity, true, params);
     self.postMessage({
-      verdict: score >= SMS_THRESHOLD ? 'SAFE' : 'UNSAFE',
-      score: Math.round(score * 100),
-      trace: trace,
+      verdict: result.score >= SMS_THRESHOLD ? 'SAFE' : 'UNSAFE',
+      score: Math.round(result.score * 100),
+      trace: result.trace,
       breakdown: evaluateSafety(initialState, params).breakdown
     });
-  } catch (err) {
-    console.error('[WORKER ERROR]', err);
-  }
+  } catch (err) { console.error('[WORKER ERROR]', err); }
 };

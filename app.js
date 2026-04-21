@@ -203,18 +203,35 @@ function drawOverlay() {
 }
 
 // --- WORKER BRIDGE ---
+let searchTimeoutGuard = null;
+
 function runVerifier() {
     console.log('[VERIFIER] Initiating...');
     if (activeWorker) activeWorker.terminate();
+    if (searchTimeoutGuard) clearTimeout(searchTimeoutGuard);
     
     activeWorker = new Worker('dls_worker.js');
-    activeWorker.onerror = (e) => reportError('WORKER_CRASH', e);
-    activeWorker.onmessage = (e) => handleWorkerResult(e.data);
+    activeWorker.onerror = (e) => {
+        if (searchTimeoutGuard) clearTimeout(searchTimeoutGuard);
+        reportError('WORKER_CRASH', e);
+    };
+    activeWorker.onmessage = (e) => {
+        if (searchTimeoutGuard) clearTimeout(searchTimeoutGuard);
+        handleWorkerResult(e.data);
+    };
     
     const params = getParams();
     if (isNaN(params.depth)) return reportError('INVALID_PARAMS', 'Depth is NaN');
     
     setState(AppState.RUNNING);
+
+    // Safety Shield: Force recovery if worker hangs for 5s
+    searchTimeoutGuard = setTimeout(() => {
+        if (activeWorker) activeWorker.terminate();
+        reportError('ENGINE_TIMEOUT', 'The safety engine took too long to respond. Try reducing the Search Depth.');
+        setState(AppState.IDLE);
+    }, 5000);
+
     activeWorker.postMessage({ type: 'RUN', scenario: scenarios[currentScenarioName], params });
 }
 
