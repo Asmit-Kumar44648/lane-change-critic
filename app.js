@@ -156,8 +156,33 @@ function drawRoadLayer() {
     roadCtx.fill();
 }
 
+// --- PHYSICS & RENDERING ---
+function simTick() {
+    if (currentState !== AppState.IDLE) return;
+    
+    previousSimulationState = JSON.parse(JSON.stringify(simulationState));
+    
+    // Smooth idle movement
+    simulationState.ego.x += simulationState.ego.vx * 0.016; 
+    simulationState.neighbors.forEach(n => {
+        n.x += n.vx * 0.016;
+    });
+    
+    // Looping behavior
+    if (simulationState.ego.x > WORLD_MIN_X + WORLD_RANGE) {
+        const offset = WORLD_RANGE;
+        simulationState.ego.x -= offset;
+        simulationState.neighbors.forEach(n => n.x -= offset);
+    }
+    
+    lastTickTime = Date.now();
+}
+
 function renderFrame() {
     if (!ctx) return;
+    
+    if (currentState === AppState.IDLE) simTick();
+    
     const now = Date.now();
     const lerpFactor = (now - lastTickTime) / 100;
     ctx.clearRect(0, 0, canvas.width, canvas.height);
@@ -243,6 +268,13 @@ function handleWorkerResult(data) {
         st.textContent = v >= 0.5 ? '● PASS' : '● FAIL';
         st.className = v >= 0.5 ? 'status-pass' : 'status-fail';
     });
+
+    if (data.mathProof) {
+        const consoleEl = document.getElementById('math-console');
+        if (consoleEl) {
+            consoleEl.innerHTML = data.mathProof.map(line => `> ${line}`).join('<br>');
+        }
+    }
 
     if (data.verdict === 'SAFE') setState(AppState.RESULT_SAFE);
     else {
