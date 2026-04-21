@@ -215,7 +215,7 @@ function simTick() {
 }
 
 function drawDetailedCar(ctx, v, cx, cy, vw, vh, scale) {
-    let baseColor = v.type === 'ego' ? '#4fc3f7' : (v.mode === 'adversarial' ? '#ef5350' : '#8b949e');
+    let baseColor = v.type === 'ego' ? '#4fc3f7' : (v.mode === 'adversarial' ? '#ef5350' : '#ffffff');
     const isBraking = (v.vx < 15); // Simple visual feedback
 
     ctx.save();
