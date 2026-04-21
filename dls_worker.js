@@ -35,14 +35,34 @@ function getActions(state, isEgo) {
     if (state.laneChangeTick === 0) actions.push('INITIATE_LC');
     return actions;
   } else {
+    // CRITICAL OPTIMIZATION: Limit active neighbors to the 2 closest vehicles
+    // This keeps the branching factor (3^N) manageable for real-time search.
+    const neighborsWithDist = state.neighbors.map(n => ({ 
+      n, 
+      dist: Math.abs(n.x - state.ego.x) 
+    }));
+    neighborsWithDist.sort((a, b) => a.dist - b.dist);
+
+    const activeNeighborIds = neighborsWithDist
+      .filter(d => d.dist < 60)
+      .slice(0, 2) // Max 2 active adversaries = 3^2 = 9 combinations
+      .map(d => d.n.id);
+
     const neighborActionSets = state.neighbors.map(n => {
+      if (!activeNeighborIds.includes(n.id)) return ['MAINTAIN'];
       if (n.mode === 'normal') return ['MAINTAIN', 'ACCEL_MILD'];
       return ['HARD_BRAKE', 'ACCELERATE_CUTOFF', 'SWERVE_TOWARD'];
     });
+
+    // Compute Cartesian product
     return neighborActionSets.reduce((acc, set) => {
       const nextAcc = [];
       for (const prev of acc) {
-        for (const action of set) nextAcc.push([...prev, action]);
+        for (const action of set) {
+          prev.push(action);
+          nextAcc.push([...prev]);
+          prev.pop();
+        }
       }
       return nextAcc;
     }, [[]]);
@@ -157,14 +177,15 @@ function isTerminal(state, params) {
   return false;
 }
 
-function minimax(state, depth, alpha, beta, isEgoTurn, params, trace) {
+function minimax(state, depth, alpha, beta, isEgoTurn, params) {
   nodesExplored++;
-  depthReached = Math.max(depthReached, state.timestep);
-
+  
+  // Terminal check
   const terminal = isTerminal(state, params);
   if (terminal || depth === 0) {
     const evalResult = evaluateSafety(state, params);
-    return terminal && state.timestep < params.depth ? 0 : evalResult.sms;
+    // Huge penalty for terminal collision
+    return terminal && state.timestep < params.depth * 2 ? 0 : evalResult.sms;
   }
 
   if (isEgoTurn) {
@@ -172,7 +193,7 @@ function minimax(state, depth, alpha, beta, isEgoTurn, params, trace) {
     const actions = getActions(state, true);
     for (let action of actions) {
       const nextState = applyAction(state, action, []);
-      const score = minimax(nextState, depth - 1, alpha, beta, false, params, [...trace, { state, action: 'EGO:' + action }]);
+      const score = minimax(nextState, depth - 1, alpha, beta, false, params);
       if (score > best) best = score;
       alpha = Math.max(alpha, best);
       if (beta <= alpha) { branchesPruned++; break; }
@@ -180,22 +201,67 @@ function minimax(state, depth, alpha, beta, isEgoTurn, params, trace) {
     return best;
   } else {
     let worst = Infinity;
-    const neighborActions = getActions(state, false);
-    for (let jointAction of neighborActions) {
+    const neighborActionSets = getActions(state, false);
+    for (let jointAction of neighborActionSets) {
       const nextState = applyAction(state, null, jointAction);
-      const newTrace = [...trace, { state, action: 'ENV:' + jointAction.join(',') }];
-      const score = minimax(nextState, depth - 1, alpha, beta, true, params, newTrace);
-      if (score < worst) {
-        worst = score;
-        if (depth === params.depth || depth === params.depth - 1) {
-          currentWorstTrace = newTrace.map(t => ({ ...t.state, eval: evaluateSafety(t.state, params) }));
-        }
-      }
+      const score = minimax(nextState, depth - 1, alpha, beta, true, params);
+      if (score < worst) worst = score;
       beta = Math.min(beta, worst);
       if (beta <= alpha) { branchesPruned++; break; }
     }
     return worst;
   }
+}
+
+/**
+ * RECONSTRUCT TRACE
+ * Since we stripped trace propagation for speed, we need to find the worst-case path
+ * one more time but only for the best moves found.
+ */
+function reconstructWorstTrace(state, depth, isEgoTurn, params) {
+  const trace = [];
+  let curr = state;
+  let d = depth;
+  let egoTurn = isEgoTurn;
+
+  while (d > 0 && !isTerminal(curr, params)) {
+    const evalResult = evaluateSafety(curr, params);
+    trace.push({ ...curr, eval: evalResult });
+
+    if (egoTurn) {
+      // For Ego, we pick the move that led to the minimax score
+      // In this simple reconstruction, we just pick the MAX move
+      let bestScore = -Infinity;
+      let bestMove = 'MAINTAIN';
+      for (const move of getActions(curr, true)) {
+        const next = applyAction(curr, move, []);
+        const score = minimax(next, d - 1, -Infinity, Infinity, false, params);
+        if (score > bestScore) {
+          bestScore = score;
+          bestMove = move;
+        }
+      }
+      curr = applyAction(curr, bestMove, []);
+    } else {
+      // For Env, we pick the MIN move
+      let worstScore = Infinity;
+      let worstMove = [];
+      for (const joint of getActions(curr, false)) {
+        const next = applyAction(curr, null, joint);
+        const score = minimax(next, d - 1, -Infinity, Infinity, true, params);
+        if (score < worstScore) {
+          worstScore = score;
+          worstMove = joint;
+        }
+      }
+      curr = applyAction(curr, null, worstMove);
+    }
+    egoTurn = !egoTurn;
+    d--;
+  }
+  // Add final state
+  trace.push({ ...curr, eval: evaluateSafety(curr, params) });
+  return trace;
 }
 
 self.onmessage = function(e) {
@@ -204,7 +270,6 @@ self.onmessage = function(e) {
     nodesExplored = 0;
     branchesPruned = 0;
     depthReached = 0;
-    currentWorstTrace = [];
 
     const initialState = {
       ego: { x: scenario.ego.x, y: scenario.ego.y, vx: scenario.ego.vx, lane: scenario.ego.lane, lateralOffset: 0 },
@@ -213,13 +278,22 @@ self.onmessage = function(e) {
       laneChangeTick: 0
     };
 
-    const finalScore = minimax(initialState, params.depth * 2, -Infinity, Infinity, true, params, []);
+    // 1. Run Minimax to get the score
+    const totalDepth = params.depth * 2;
+    const finalScore = minimax(initialState, totalDepth, -Infinity, Infinity, true, params);
+    
+    // 2. Reconstruct the worst-case trace for replay if UNSAFE
+    let trace = [];
+    if (finalScore < SMS_THRESHOLD) {
+      trace = reconstructWorstTrace(initialState, totalDepth, true, params);
+    }
+
     const finalEval = evaluateSafety(initialState, params);
 
     self.postMessage({
       verdict: finalScore >= SMS_THRESHOLD ? 'SAFE' : 'UNSAFE',
       score: Math.round(finalScore * 100),
-      trace: currentWorstTrace,
+      trace: trace,
       stats: { nodesExplored, branchesPruned, depthReached },
       breakdown: finalEval.breakdown
     });
