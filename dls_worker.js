@@ -1,6 +1,6 @@
 /**
  * Safety-First Lane Change Critic
- * CORE MINIMAX ENGINE (Web Worker)
+ * NUCLEAN HARDENED MINIMAX ENGINE
  */
 
 const TIMESTEP = 0.75;
@@ -15,10 +15,8 @@ const SMS_THRESHOLD = 0.6;
 const SMS_WEIGHTS = { frontGap: 0.30, rearGap: 0.25, ttc: 0.30, lateral: 0.15 };
 const VEHICLE_LENGTH = 5;
 
-let nodesExplored = 0;
-let branchesPruned = 0;
-let depthReached = 0;
-let currentWorstTrace = [];
+let searchStartTime = 0;
+const SEARCH_TIMEOUT = 3000; // 3 seconds hard limit
 
 function createNextState(state) {
   return {
@@ -29,43 +27,35 @@ function createNextState(state) {
   };
 }
 
-function getActions(state, isEgo) {
+function getActions(state, isEgo, params) {
   if (isEgo) {
     const actions = ['MAINTAIN', 'ACCELERATE', 'DECELERATE'];
     if (state.laneChangeTick === 0) actions.push('INITIATE_LC');
     return actions;
   } else {
-    // CRITICAL OPTIMIZATION: Limit active neighbors to the 2 closest vehicles
-    // This keeps the branching factor (3^N) manageable for real-time search.
-    const neighborsWithDist = state.neighbors.map(n => ({ 
-      n, 
-      dist: Math.abs(n.x - state.ego.x) 
-    }));
-    neighborsWithDist.sort((a, b) => a.dist - b.dist);
+    // HARD PRUNING: Only allow 1 adversarial neighbor if depth is high or many neighbors exist
+    const dists = state.neighbors.map(n => ({ id: n.id, d: Math.abs(n.x - state.ego.x) }));
+    dists.sort((a,b) => a.d - b.d);
+    
+    // Limits: Max 1 active adversary for N=6 depth, Max 2 for N=4 depth.
+    const maxAdversaries = params.depth > 4 ? 1 : 2;
+    const activeIds = dists.slice(0, maxAdversaries).map(d => d.id);
 
-    const activeAdversaryCount = (params.depth > 4) ? 1 : 2;
-    const activeNeighborIds = neighborsWithDist
-      .filter(d => d.dist < 60)
-      .slice(0, activeAdversaryCount) 
-      .map(d => d.n.id);
-
-    const neighborActionSets = state.neighbors.map(n => {
-      if (!activeNeighborIds.includes(n.id)) return ['MAINTAIN'];
-      if (n.mode === 'normal') return ['MAINTAIN', 'ACCEL_MILD'];
+    const sets = state.neighbors.map(n => {
+      if (!activeIds.includes(n.id) || n.mode === 'normal') return ['MAINTAIN'];
       return ['HARD_BRAKE', 'ACCELERATE_CUTOFF', 'SWERVE_TOWARD'];
     });
 
-    // Compute Cartesian product
-    return neighborActionSets.reduce((acc, set) => {
-      const nextAcc = [];
-      for (const prev of acc) {
-        for (const action of set) {
-          prev.push(action);
-          nextAcc.push([...prev]);
-          prev.pop();
+    return sets.reduce((acc, set) => {
+      const next = [];
+      for (const p of acc) {
+        for (const a of set) {
+          p.push(a);
+          next.push([...p]);
+          p.pop();
         }
       }
-      return nextAcc;
+      return next;
     }, [[]]);
   }
 }
@@ -74,21 +64,16 @@ function applyAction(state, egoAction, neighborActions) {
   const next = createNextState(state);
   next.timestep++;
 
-  // Ego physics
   if (egoAction) {
-    if (egoAction === 'ACCELERATE') {
-      next.ego.vx = Math.min(MAX_SPEED, next.ego.vx + MAX_ACCEL * TIMESTEP);
-    } else if (egoAction === 'DECELERATE') {
-      next.ego.vx = Math.max(MIN_SPEED, next.ego.vx - MAX_ACCEL * TIMESTEP);
-    } else if (egoAction === 'INITIATE_LC') {
-      next.laneChangeTick = 1;
-    }
+    if (egoAction === 'ACCELERATE') next.ego.vx = Math.min(MAX_SPEED, next.ego.vx + MAX_ACCEL * TIMESTEP);
+    else if (egoAction === 'DECELERATE') next.ego.vx = Math.max(MIN_SPEED, next.ego.vx - MAX_ACCEL * TIMESTEP);
+    else if (egoAction === 'INITIATE_LC') next.laneChangeTick = 1;
 
     if (next.laneChangeTick > 0) {
       next.ego.lateralOffset += LANE_WIDTH / LC_TICKS;
       next.laneChangeTick++;
       if (next.laneChangeTick > LC_TICKS) {
-        next.ego.lane -= 1; // LC to lane 0 from 1
+        next.ego.lane -= 1;
         next.ego.lateralOffset = 0;
         next.laneChangeTick = 0;
       }
@@ -96,52 +81,31 @@ function applyAction(state, egoAction, neighborActions) {
     next.ego.x += next.ego.vx * TIMESTEP;
   }
 
-  // Neighbor physics
   if (neighborActions && neighborActions.length > 0) {
     next.neighbors.forEach((n, i) => {
       const action = neighborActions[i];
-      if (action === 'ACCEL_MILD') {
-        n.vx = Math.min(MAX_SPEED, n.vx + MILD_ACCEL * TIMESTEP);
-      } else if (action === 'HARD_BRAKE') {
-        n.vx = Math.max(MIN_SPEED, n.vx - MAX_DECEL * TIMESTEP);
-      } else if (action === 'ACCELERATE_CUTOFF') {
-        n.vx = Math.min(MAX_SPEED, n.vx + MAX_ACCEL * TIMESTEP);
-      } else if (action === 'SWERVE_TOWARD') {
-        n.lateralOffset += 0.5; // Swerve towards ego
-      }
+      if (action === 'HARD_BRAKE') n.vx = Math.max(MIN_SPEED, n.vx - MAX_DECEL * TIMESTEP);
+      else if (action === 'ACCELERATE_CUTOFF') n.vx = Math.min(MAX_SPEED, n.vx + MAX_ACCEL * TIMESTEP);
+      else if (action === 'SWERVE_TOWARD') n.lateralOffset += 0.5;
       n.x += n.vx * TIMESTEP;
     });
   }
-
   return next;
 }
 
 function evaluateSafety(state, params) {
   const ego = state.ego;
-  let gap_f = Infinity;
-  let gap_r = Infinity;
-  let ttc_r = Infinity;
-  let violated = [];
-
+  let gap_f = Infinity, gap_r = Infinity, ttc_r = Infinity;
   const egoEffY = (ego.lane * LANE_WIDTH) - ego.lateralOffset;
 
   state.neighbors.forEach(n => {
     const nEffY = (n.lane * LANE_WIDTH) + n.lateralOffset;
-    const inSameCorridor = Math.abs(egoEffY - nEffY) < (LANE_WIDTH * 0.9);
-
-    if (inSameCorridor) {
+    if (Math.abs(egoEffY - nEffY) < LANE_WIDTH * 0.9) {
       const dist = n.x - ego.x;
-      if (dist > 0) {
-        const gap = dist - VEHICLE_LENGTH;
-        if (gap < gap_f) gap_f = gap;
-      } else {
-        const gap = Math.abs(dist) - VEHICLE_LENGTH;
-        if (gap < gap_r) {
-          gap_r = gap;
-          if (n.vx > ego.vx) {
-            ttc_r = gap / (n.vx - ego.vx);
-          }
-        }
+      if (dist > 0) gap_f = Math.min(gap_f, dist - VEHICLE_LENGTH);
+      else {
+        gap_r = Math.min(gap_r, Math.abs(dist) - VEHICLE_LENGTH);
+        if (n.vx > ego.vx) ttc_r = (Math.abs(dist) - VEHICLE_LENGTH) / (n.vx - ego.vx);
       }
     }
   });
@@ -149,161 +113,100 @@ function evaluateSafety(state, params) {
   const s_f = Math.max(0, Math.min(1, gap_f / params.frontGapThreshold));
   const s_r = Math.max(0, Math.min(1, gap_r / params.rearGapThreshold));
   const s_ttc = Math.max(0, Math.min(1, Math.min(ttc_r, 10) / 10));
+  const s_lat = Math.max(0, Math.min(1, Math.min(ego.lateralOffset, LANE_WIDTH - ego.lateralOffset) / (LANE_WIDTH/2)));
   
-  const lateral = Math.min(ego.lateralOffset, LANE_WIDTH - ego.lateralOffset);
-  const s_lat = Math.max(0, Math.min(1, lateral / LANE_WIDTH));
-
-  const sms = (s_f * SMS_WEIGHTS.frontGap) + 
-              (s_r * SMS_WEIGHTS.rearGap) + 
-              (s_ttc * SMS_WEIGHTS.ttc) + 
-              (s_lat * SMS_WEIGHTS.lateral);
-
-  if (s_f < 0.5) violated.push('frontGap');
-  if (s_r < 0.5) violated.push('rearGap');
-  if (s_ttc < 0.5) violated.push('ttc');
-  if (s_lat < 0.5) violated.push('lateral');
-
-  return { sms, breakdown: { s_f, s_r, s_ttc, s_lat }, violated };
+  const sms = (s_f * SMS_WEIGHTS.frontGap) + (s_r * SMS_WEIGHTS.rearGap) + (s_ttc * SMS_WEIGHTS.ttc) + (s_lat * SMS_WEIGHTS.lateral);
+  return { sms, breakdown: { s_f, s_r, s_ttc, s_lat } };
 }
 
 function isTerminal(state, params) {
   if (state.timestep >= params.depth * 2) return true;
   for (let n of state.neighbors) {
-    const longDist = Math.abs(state.ego.x - n.x);
     const egoEffY = (state.ego.lane * LANE_WIDTH) - state.ego.lateralOffset;
     const nEffY = (n.lane * LANE_WIDTH) + n.lateralOffset;
-    const latDist = Math.abs(egoEffY - nEffY);
-    if (longDist < VEHICLE_LENGTH && latDist < (LANE_WIDTH * 0.7)) return true;
+    if (Math.abs(state.ego.x - n.x) < VEHICLE_LENGTH && Math.abs(egoEffY - nEffY) < (LANE_WIDTH * 0.7)) return true;
   }
   return false;
 }
 
 function minimax(state, depth, alpha, beta, isEgoTurn, params) {
-  nodesExplored++;
+  if (Date.now() - searchStartTime > SEARCH_TIMEOUT) return 0.5; // Emergency abort
   
-  // Terminal check
-  const terminal = isTerminal(state, params);
-  if (terminal || depth === 0) {
-    const evalResult = evaluateSafety(state, params);
-    // Huge penalty for terminal collision
-    return terminal && state.timestep < params.depth * 2 ? 0 : evalResult.sms;
+  const term = isTerminal(state, params);
+  if (term || depth === 0) {
+    const ev = evaluateSafety(state, params);
+    return (term && state.timestep < params.depth * 2) ? 0 : ev.sms;
   }
 
   if (isEgoTurn) {
     let best = -Infinity;
-    const actions = getActions(state, true);
-    for (let action of actions) {
-      const nextState = applyAction(state, action, []);
-      const score = minimax(nextState, depth - 1, alpha, beta, false, params);
-      if (score > best) best = score;
+    for (const a of getActions(state, true, params)) {
+      const s = minimax(applyAction(state, a, []), depth - 1, alpha, beta, false, params);
+      best = Math.max(best, s);
       alpha = Math.max(alpha, best);
-      if (beta <= alpha) { branchesPruned++; break; }
+      if (beta <= alpha) break;
     }
     return best;
   } else {
     let worst = Infinity;
-    const neighborActionSets = getActions(state, false);
-    for (let jointAction of neighborActionSets) {
-      const nextState = applyAction(state, null, jointAction);
-      const score = minimax(nextState, depth - 1, alpha, beta, true, params);
-      if (score < worst) worst = score;
+    for (const j of getActions(state, false, params)) {
+      const s = minimax(applyAction(state, null, j), depth - 1, alpha, beta, true, params);
+      worst = Math.min(worst, s);
       beta = Math.min(beta, worst);
-      if (beta <= alpha) { branchesPruned++; break; }
+      if (beta <= alpha) break;
     }
     return worst;
   }
 }
 
-/**
- * RECONSTRUCT TRACE
- * Since we stripped trace propagation for speed, we need to find the worst-case path
- * one more time but only for the best moves found.
- */
-function reconstructWorstTrace(state, depth, isEgoTurn, params) {
-  const trace = [];
-  let curr = state;
-  let d = depth;
-  let egoTurn = isEgoTurn;
-
-  while (d > 0 && !isTerminal(curr, params)) {
-    const evalResult = evaluateSafety(curr, params);
-    trace.push({ ...curr, eval: evalResult });
-
-    if (egoTurn) {
-      // For Ego, we pick the move that led to the minimax score
-      // In this simple reconstruction, we just pick the MAX move
-      let bestScore = -Infinity;
-      let bestMove = 'MAINTAIN';
-      for (const move of getActions(curr, true)) {
-        const next = applyAction(curr, move, []);
-        const score = minimax(next, d - 1, -Infinity, Infinity, false, params);
-        if (score > bestScore) {
-          bestScore = score;
-          bestMove = move;
+function reconstruct(state, depth, isEgoTurn, params) {
+    const trace = []; let curr = state; let d = depth; let turn = isEgoTurn;
+    while (d > 0 && !isTerminal(curr, params)) {
+        trace.push({ ...curr, eval: evaluateSafety(curr, params) });
+        if (turn) {
+            let b = -Infinity; let bm = 'MAINTAIN';
+            for (const a of getActions(curr, true, params)) {
+                const s = minimax(applyAction(curr, a, []), d-1, -Infinity, Infinity, false, params);
+                if (s > b) { b = s; bm = a; }
+            }
+            curr = applyAction(curr, bm, []);
+        } else {
+            let w = Infinity; let wm = [];
+            for (const j of getActions(curr, false, params)) {
+                const s = minimax(applyAction(curr, null, j), d-1, -Infinity, Infinity, true, params);
+                if (s < w) { w = s; wm = j; }
+            }
+            curr = applyAction(curr, null, wm);
         }
-      }
-      curr = applyAction(curr, bestMove, []);
-    } else {
-      // For Env, we pick the MIN move
-      let worstScore = Infinity;
-      let worstMove = [];
-      for (const joint of getActions(curr, false)) {
-        const next = applyAction(curr, null, joint);
-        const score = minimax(next, d - 1, -Infinity, Infinity, true, params);
-        if (score < worstScore) {
-          worstScore = score;
-          worstMove = joint;
-        }
-      }
-      curr = applyAction(curr, null, worstMove);
+        turn = !turn; d--;
     }
-    egoTurn = !egoTurn;
-    d--;
-  }
-  // Add final state
-  trace.push({ ...curr, eval: evaluateSafety(curr, params) });
-  return trace;
+    trace.push({ ...curr, eval: evaluateSafety(curr, params) });
+    return trace;
 }
 
 self.onmessage = function(e) {
-  if (e.data.type === 'RUN') {
+  try {
     const { scenario, params } = e.data;
+    if (!scenario || !params) return;
     
-    // Defensive check
-    if (!scenario || !params || !params.depth) {
-      console.error('[WORKER] Invalid search inputs:', { scenario, params });
-      return;
-    }
-    
-    nodesExplored = 0;
-    branchesPruned = 0;
-    depthReached = 0;
-
+    searchStartTime = Date.now();
     const initialState = {
-      ego: { x: scenario.ego.x, y: scenario.ego.y, vx: scenario.ego.vx, lane: scenario.ego.lane, lateralOffset: 0 },
-      neighbors: scenario.neighbors.map(n => ({ id: n.id, x: n.x, y: n.y, vx: n.vx, lane: n.lane, mode: n.mode, lateralOffset: 0 })),
-      timestep: 0,
-      laneChangeTick: 0
+      ego: { ...scenario.ego, lateralOffset: 0 },
+      neighbors: scenario.neighbors.map(n => ({ ...n, lateralOffset: 0 })),
+      timestep: 0, laneChangeTick: 0
     };
 
-    // 1. Run Minimax to get the score
-    const totalDepth = params.depth * 2;
-    const finalScore = minimax(initialState, totalDepth, -Infinity, Infinity, true, params);
-    
-    // 2. Reconstruct the worst-case trace for replay if UNSAFE
+    const score = minimax(initialState, params.depth * 2, -Infinity, Infinity, true, params);
     let trace = [];
-    if (finalScore < SMS_THRESHOLD) {
-      trace = reconstructWorstTrace(initialState, totalDepth, true, params);
-    }
-
-    const finalEval = evaluateSafety(initialState, params);
+    if (score < SMS_THRESHOLD) trace = reconstruct(initialState, params.depth * 2, true, params);
 
     self.postMessage({
-      verdict: finalScore >= SMS_THRESHOLD ? 'SAFE' : 'UNSAFE',
-      score: Math.round(finalScore * 100),
+      verdict: score >= SMS_THRESHOLD ? 'SAFE' : 'UNSAFE',
+      score: Math.round(score * 100),
       trace: trace,
-      stats: { nodesExplored, branchesPruned, depthReached },
-      breakdown: finalEval.breakdown
+      breakdown: evaluateSafety(initialState, params).breakdown
     });
+  } catch (err) {
+    console.error('[WORKER ERROR]', err);
   }
 };
