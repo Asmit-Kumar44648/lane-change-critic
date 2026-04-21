@@ -142,18 +142,54 @@ function worldToCanvas(worldX, worldLane, lateralOffset = 0) {
 }
 
 // --- RENDERING ---
+let roadOffset = 0;
+
 function drawRoadLayer() {
     const w = roadCanvas.width, h = roadCanvas.height;
     roadCtx.clearRect(0, 0, w, h);
-    roadCtx.fillStyle = '#1a1a2e';
-    roadCtx.fillRect(0, HORIZON_Y, w, h - HORIZON_Y);
+    
+    // Far Background (sky-like)
+    roadCtx.fillStyle = '#0a0a14';
+    roadCtx.fillRect(0, 0, w, HORIZON_Y);
+
+    // Asphalt Texture
+    const asphalt = roadCtx.createLinearGradient(0, HORIZON_Y, 0, h);
+    asphalt.addColorStop(0, '#1a1b26');
+    asphalt.addColorStop(1, '#0f101a');
+    roadCtx.fillStyle = asphalt;
+    
     const topW = w * 0.4, botW = w - 100;
     roadCtx.beginPath();
     roadCtx.moveTo((w-topW)/2, HORIZON_Y); roadCtx.lineTo((w+topW)/2, HORIZON_Y);
-    roadCtx.lineTo((w+botW)/2, h-20); roadCtx.lineTo((w-botW)/2, h-20);
+    roadCtx.lineTo((w+botW)/2, h); roadCtx.lineTo((w-botW)/2, h);
     roadCtx.closePath();
-    roadCtx.fillStyle = '#111827';
     roadCtx.fill();
+
+    // Side Barriers
+    roadCtx.strokeStyle = '#30363d';
+    roadCtx.lineWidth = 2;
+    roadCtx.stroke();
+}
+
+function drawDynamicRoad(ctx, laneOffset) {
+    const w = canvas.width, h = canvas.height;
+    const topW = w * 0.4, botW = w - 100;
+    
+    // Lane Markings
+    ctx.setLineDash([20, 30]);
+    ctx.lineDashOffset = -laneOffset * 2;
+    ctx.strokeStyle = 'rgba(255,255,255,0.2)';
+    ctx.lineWidth = 2;
+
+    for (let i = 1; i <= 2; i++) {
+        const xTop = (w - topW) / 2 + (i / 3) * topW;
+        const xBot = (w - botW) / 2 + (i / 3) * botW;
+        ctx.beginPath();
+        ctx.moveTo(xTop, HORIZON_Y);
+        ctx.lineTo(xBot, h);
+        ctx.stroke();
+    }
+    ctx.setLineDash([]);
 }
 
 // --- PHYSICS & RENDERING ---
@@ -178,34 +214,85 @@ function simTick() {
     lastTickTime = Date.now();
 }
 
+function drawDetailedCar(ctx, v, cx, cy, vw, vh, scale) {
+    let baseColor = v.type === 'ego' ? '#4fc3f7' : (v.mode === 'adversarial' ? '#ef5350' : '#8b949e');
+    const isBraking = (v.vx < 15); // Simple visual feedback
+
+    ctx.save();
+    ctx.translate(cx, cy);
+
+    // Dynamic Shadow
+    ctx.shadowBlur = 15 * scale;
+    ctx.shadowColor = 'rgba(0,0,0,0.5)';
+    ctx.shadowOffsetY = 5 * scale;
+
+    // Main Body
+    const gradient = ctx.createLinearGradient(0, -vh/2, 0, vh/2);
+    gradient.addColorStop(0, baseColor);
+    gradient.addColorStop(1, '#000000');
+    ctx.fillStyle = gradient;
+    ctx.roundRect(-vw/2, -vh/2, vw, vh, 4 * scale);
+    ctx.fill();
+
+    // Windshield (Front)
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.6)';
+    ctx.roundRect(-vw/2 + 2*scale, -vh/2 + 2*scale, vw/3, vh - 4*scale, 2*scale);
+    ctx.fill();
+
+    // Rear Window
+    ctx.roundRect(vw/6, -vh/2 + 3*scale, vw/4, vh - 6*scale, 2*scale);
+    ctx.fill();
+
+    // Headlights (Always on)
+    ctx.shadowBlur = 0;
+    ctx.fillStyle = '#fff9c4';
+    ctx.beginPath();
+    ctx.arc(-vw/2 + 2*scale, -vh/4, 2*scale, 0, Math.PI*2);
+    ctx.arc(-vw/2 + 2*scale, vh/4, 2*scale, 0, Math.PI*2);
+    ctx.fill();
+
+    // Brakelights
+    ctx.fillStyle = isBraking ? '#ff1744' : '#b71c1c';
+    if (isBraking) { ctx.shadowBlur = 10 * scale; ctx.shadowColor = '#ff1744'; }
+    ctx.fillRect(vw/2 - 2*scale, -vh/2 + 2*scale, 2*scale, 4*scale);
+    ctx.fillRect(vw/2 - 2*scale, vh/2 - 6*scale, 2*scale, 4*scale);
+
+    ctx.restore();
+}
+
 function renderFrame() {
     if (!ctx) return;
     
     if (currentState === AppState.IDLE) simTick();
     
-    const now = Date.now();
-    const lerpFactor = (now - lastTickTime) / 100;
+    // Update road scrolling
+    if (simulationState && simulationState.ego) {
+        roadOffset = (roadOffset + simulationState.ego.vx * 0.1) % 1000;
+    }
+
     ctx.clearRect(0, 0, canvas.width, canvas.height);
     ctx.drawImage(roadCanvas, 0, 0);
+    drawDynamicRoad(ctx, roadOffset);
     
     if (simulationState) {
         const vehicles = [{ ...simulationState.ego, id: 'ego', type: 'ego' }, ...simulationState.neighbors];
-        vehicles.sort((a,b) => a.x - b.x); // Simple painter logic
+        vehicles.sort((a,b) => a.x - b.x); // Painter's logic
         vehicles.forEach(v => {
-            let color = v.type === 'ego' ? '#4fc3f7' : (v.mode === 'adversarial' ? '#ef5350' : '#78909c');
             const { cx, cy, scale } = worldToCanvas(v.x, v.lane, v.lateralOffset || 0);
             if (cy < HORIZON_Y - 20) return;
-            const vw = 40 * scale, vh = 20 * scale;
-            ctx.save();
-            ctx.translate(cx, cy);
+            const vw = 50 * scale, vh = 24 * scale;
+
             if (highlightedVehicleId === v.id) {
-                ctx.shadowBlur = 10; ctx.shadowColor = '#ffb300';
-                ctx.fillStyle = 'rgba(255, 179, 0, 0.4)';
-                ctx.roundRect(-vw/2-2, -vh/2-2, vw+4, vh+4, 4); ctx.fill();
+                ctx.save();
+                ctx.translate(cx, cy);
+                ctx.shadowBlur = 15; ctx.shadowColor = '#ffb300';
+                ctx.strokeStyle = '#ffb300';
+                ctx.lineWidth = 2;
+                ctx.strokeRect(-vw/2-4, -vh/2-4, vw+8, vh+8);
+                ctx.restore();
             }
-            ctx.fillStyle = color;
-            ctx.roundRect(-vw/2, -vh/2, vw, vh, 4); ctx.fill();
-            ctx.restore();
+            
+            drawDetailedCar(ctx, v, cx, cy, vw, vh, scale);
         });
     }
     drawOverlay();
