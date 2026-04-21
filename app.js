@@ -15,15 +15,12 @@ let lastResult = null;
 let activeAnnotation = null;
 let activeCommentary = null;
 
-const AppState = {
-  IDLE: 'IDLE',
-  RUNNING: 'RUNNING',
-  RESULT_SAFE: 'RESULT_SAFE',
-  RESULT_UNSAFE: 'RESULT_UNSAFE',
-  REPLAYING: 'REPLAYING'
-};
-
 let currentState = AppState.IDLE;
+const tooltipTimers = {};
+let replayTrace = [];
+let replayIndex = 0;
+let replayPlaying = false;
+let replayInterval = null;
 
 // --- UTILITIES ---
 function setState(newState) {
@@ -275,6 +272,8 @@ export function renderFrame() {
 function drawOverlay() {
     // Canvas Loading Shimmer (Diagonal Stripes)
     if (currentState === AppState.RUNNING) {
+        const w = canvas.width;
+        const h = canvas.height;
         ctx.save();
         ctx.globalAlpha = 0.05;
         ctx.fillStyle = 'white';
@@ -536,6 +535,16 @@ worker.onmessage = function(e) {
         }
     }
 };
+
+function updateSimState(frame) {
+    previousSimulationState = JSON.parse(JSON.stringify(simulationState));
+    simulationState = JSON.parse(JSON.stringify(frame));
+    lastTickTime = Date.now();
+}
+
+function setHighlight(id) {
+    highlightedVehicleId = id;
+}
 
 // --- REPLAY CONTROLLER ---
 let replayTrace = [];

@@ -166,7 +166,7 @@ function evaluateSafety(state, params) {
 }
 
 function isTerminal(state, params) {
-  if (state.timestep >= params.depth) return true;
+  if (state.timestep >= params.depth * 2) return true;
   for (let n of state.neighbors) {
     const longDist = Math.abs(state.ego.x - n.x);
     const egoEffY = (state.ego.lane * LANE_WIDTH) - state.ego.lateralOffset;
